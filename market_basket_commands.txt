@@ -1,0 +1,53 @@
+#Place the raw transactions in HDFS
+hadoop fs -mkdir /user/oracle/market_basket
+hadoop fs -put new_market_basket_sample.xml /user/oracle/market_basket
+
+
+#If you don't have ant installed
+cd pairwise/src/com/oracle/hive/udtf
+
+javac -cp /usr/lib/hive/lib/hive-common-0.9.0-cdh4.1.2.jar:/usr/lib/hive/lib/hive-exec-0.9.0-cdh4.1.2.jar PairwiseUDTF.java
+jar -cf pairwise.jar com/
+
+#In Hive
+
+#Add the Jar
+add jar /mnt/shared/market_basket_example/pairwise.jar; 
+
+#Create a function
+
+CREATE temporary function pairwise AS 'com.oracle.hive.udtf.PairwiseUDTF'; 
+
+#CREATE the base table
+CREATE EXTERNAL TABLE raw_baskets (record string)
+ROW FORMAT DELIMITED
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE
+LOCATION '/user/oracle/market_basket';
+
+#Extract the things that are interesting about the baskets
+CREATE TABLE market_basket AS
+SELECT xpath_string(record, "/record/Customer") as customer, xpath_string(record, "/record/Email") as email, 
+xpath_int(record, "/record/PurchaseDate") as purchase_date, xpath_string(record,"/record/Basket") as basket
+FROM raw_baskets;
+
+# view the pairwise expansion output
+SELECT m1, m2, COUNT(*) FROM market_basket
+LATERAL VIEW pairwise(basket) pwise AS m1,m2 GROUP BY m1,m2;
+
+# view "high occurring pairs" for KRAFT foods
+SELECT basket_counts.m1 as item1, basket_counts.m2 as item2, basket_counts.frequency FROM (
+SELECT m1, m2, COUNT(*) as frequency FROM market_basket
+LATERAL VIEW pairwise(basket) pwise AS m1,m2 GROUP BY m1,m2 ORDER BY frequency DESC
+) basket_counts WHERE basket_counts.frequency > 1 AND (basket_counts.m1 LIKE '%KRAFT%' OR basket_counts.m2 LIKE '%KRAFT%');
+
+# build a support denominator table
+CREATE TABLE base_frequency AS 
+SELECT item, COUNT(*) as item_frequency, COUNT(*)/39983 as support FROM market_basket
+LATERAL VIEW explode(split(basket, ",")) itemwise as item GROUP BY item;
+
+
+#OLH + ODM example
+# get the exploded view
+INSERT OVERWRITE DIRECTORY '/user/oracle/basket_transactions' SELECT purchase_date, customer, m1 FROM market_basket
+LATERAL VIEW explode(split(basket,",")) extable AS m1;
